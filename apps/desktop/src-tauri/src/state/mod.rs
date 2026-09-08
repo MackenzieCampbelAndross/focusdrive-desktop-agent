@@ -9,6 +9,7 @@ pub enum SessionState {
     ShiftReady,
     Working,
     ManualBreak,
+    AutomaticBreak,
     ShiftCompleting,
     ShiftSummary,
 }
@@ -20,6 +21,7 @@ impl fmt::Display for SessionState {
             SessionState::ShiftReady => write!(f, "SHIFT_READY"),
             SessionState::Working => write!(f, "WORKING"),
             SessionState::ManualBreak => write!(f, "MANUAL_BREAK"),
+            SessionState::AutomaticBreak => write!(f, "AUTOMATIC_BREAK"),
             SessionState::ShiftCompleting => write!(f, "SHIFT_COMPLETING"),
             SessionState::ShiftSummary => write!(f, "SHIFT_SUMMARY"),
         }
@@ -46,10 +48,13 @@ impl StateMachine {
         match (self.current_state, next_state) {
             (SessionState::LoggedOut, SessionState::ShiftReady) => true,
             (SessionState::ShiftReady, SessionState::Working) => true,
-            (SessionState::Working, SessionState::ManualBreak) => true,
+                        (SessionState::Working, SessionState::AutomaticBreak) => true,
+            (SessionState::AutomaticBreak, SessionState::Working) => true,
             (SessionState::ManualBreak, SessionState::Working) => true,
+            (SessionState::Working, SessionState::ManualBreak) => true,
             (SessionState::Working, SessionState::ShiftCompleting) => true,
             (SessionState::ManualBreak, SessionState::ShiftCompleting) => true, // End shift during break
+            (SessionState::AutomaticBreak, SessionState::ShiftCompleting) => true, // End shift during auto break
             (SessionState::ShiftCompleting, SessionState::ShiftSummary) => true,
             (SessionState::ShiftSummary, SessionState::ShiftReady) => true,
             (SessionState::ShiftReady, SessionState::LoggedOut) => true,

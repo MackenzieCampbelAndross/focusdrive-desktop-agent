@@ -1,4 +1,6 @@
 pub mod auth;
+pub mod config;
+pub mod telemetry;
 pub mod commands;
 pub mod device;
 pub mod errors;
@@ -7,18 +9,23 @@ pub mod session;
 pub mod state;
 pub mod tray;
 
-use std::sync::{Arc, Mutex};
-use tauri::WindowEvent;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use auth::{AuthMode, create_auth_repository};
 use device::{DeviceInfo, DeviceManager};
 use persistence::Database;
 use session::SessionManager;
+use crate::telemetry::activity_aggregator::ActivityAggregator;
+use crate::telemetry::telemetry_loop::spawn_telemetry_loop;
+use crate::config::telemetry::TelemetryConfig;
+use tauri::WindowEvent;
 
 pub struct AppState {
     pub auth: Arc<Mutex<Box<dyn auth::AuthRepository>>>,
     pub session: Arc<Mutex<SessionManager>>,
     pub device_info: Arc<Mutex<DeviceInfo>>,
     pub db: Database,
+    pub activity_aggregator: Arc<Mutex<ActivityAggregator>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -58,12 +65,23 @@ pub fn run() {
 
     // Note: Session recovery restores local shift state without fabricating authentication.
 
+    // Initialize activity aggregator and telemetry loop
+    let activity_aggregator = Arc::new(Mutex::new(ActivityAggregator::new(db.clone())));
+    let telemetry_config = TelemetryConfig::from_env();
     let app_state = AppState {
         auth: Arc::new(Mutex::new(auth_repo)),
         session: Arc::new(Mutex::new(session_manager)),
         device_info: Arc::new(Mutex::new(device_info)),
         db,
+        activity_aggregator: activity_aggregator.clone(),
     };
+
+    // Spawn telemetry loop (ignore handle)
+    let _telemetry_handle = spawn_telemetry_loop(
+        Arc::clone(&app_state.session),
+        activity_aggregator.clone(),
+        telemetry_config,
+    );
 
     tauri::Builder::default()
         .manage(app_state)

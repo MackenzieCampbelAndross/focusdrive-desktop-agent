@@ -198,6 +198,95 @@ impl SessionManager {
         Ok(break_session)
     }
 
+    /// Start an automatic idle break. Called by the telemetry loop when
+    /// idle time >= 60 seconds while in Working state.
+    /// The break_type is "automatic_idle". Duration is computed when ended.
+    pub fn start_automatic_break(&mut self) -> Result<BreakSession> {
+        let session = self.active_session.as_ref().ok_or_else(|| {
+            AppError::SessionError("Cannot start automatic break: No active work shift.".to_string())
+        })?;
+
+        if self.active_break.is_some() {
+            return Err(AppError::SessionError("A break is already active.".to_string()));
+        }
+
+        self.state_machine.transition_to(SessionState::AutomaticBreak)?;
+
+        let break_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+
+        let break_session = BreakSession {
+            id: break_id,
+            work_session_id: session.id.clone(),
+            employee_id: session.employee_id.clone(),
+            break_type: "automatic_idle".to_string(),
+            started_at: now.clone(),
+            ended_at: None,
+            duration_seconds: 0,
+            created_at: now.clone(),
+        };
+
+        let conn = self.db.get_connection()?;
+        conn.execute(
+            "INSERT INTO break_sessions (id, work_session_id, employee_id, type, started_at, ended_at, duration_seconds, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, 0, ?6)",
+            [
+                &break_session.id,
+                &break_session.work_session_id,
+                &break_session.employee_id,
+                &break_session.break_type,
+                &break_session.started_at,
+                &break_session.created_at,
+            ],
+        )
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        self.active_break = Some(break_session.clone());
+
+        tracing::info!("Automatic idle break started");
+
+        Ok(break_session)
+    }
+
+    /// End an automatic idle break. Called by the telemetry loop when
+    /// idle time drops below 60 seconds while in AutomaticBreak state.
+    /// Duration = total_break_seconds - 60 (first 60s not counted).
+    pub fn end_automatic_break(&mut self) -> Result<()> {
+        let active_break = self.active_break.as_ref().ok_or_else(|| {
+            AppError::SessionError("Cannot end automatic break: No active break session.".to_string())
+        })?;
+
+        self.state_machine.transition_to(SessionState::Working)?;
+
+        let now_dt = Utc::now();
+        let now_str = now_dt.to_rfc3339();
+
+        let start_dt = DateTime::parse_from_rfc3339(&active_break.started_at)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or(now_dt);
+
+        let total_break_seconds = (now_dt - start_dt).num_seconds().max(0);
+        // First 60 seconds are NOT counted as break time
+        let effective_duration = (total_break_seconds - 60).max(0);
+
+        let conn = self.db.get_connection()?;
+        conn.execute(
+            "UPDATE break_sessions SET ended_at = ?1, duration_seconds = ?2 WHERE id = ?3",
+            [&now_str, &effective_duration.to_string(), &active_break.id],
+        )
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        let mut completed_break = active_break.clone();
+        completed_break.ended_at = Some(now_str);
+        completed_break.duration_seconds = effective_duration;
+
+        self.active_break = None;
+
+        tracing::info!("Automatic idle break ended. Effective duration: {}s", effective_duration);
+
+        Ok(())
+    }
+
     pub fn resume_work(&mut self) -> Result<()> {
         let active_break = self.active_break.as_ref().ok_or_else(|| {
             AppError::SessionError("Cannot resume work: No active break session.".to_string())
