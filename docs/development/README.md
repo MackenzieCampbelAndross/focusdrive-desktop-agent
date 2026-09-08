@@ -1,23 +1,17 @@
-# Development Setup Guide
+# Development Guide & Testing
 
-## Prerequisites
-- Node.js (v22+)
-- npm (v11+)
-- Rust & Cargo (1.92+)
-- Visual Studio Build Tools (C++ / MSVC)
-- WebView2 Runtime (Included on Windows 10/11)
+## Development Authentication
+Phase 1 includes a development authentication mode allowing test employee login without live Supabase credentials:
+- **Test Employee 1**: `alex@focusdrive.dev` (Senior Engineer [DEV])
+- **Test Employee 2**: `sarah@focusdrive.dev` (Product Manager [DEV])
 
-## Running Locally
+Password accepts any string in Development Mode.
+
+## Testing Phase 1 Session Flow
 ```bash
-# Install dependencies
-npm install
-
-# Run frontend build
-npm run build:frontend
-
-# Run Rust tests
+# Run Rust unit tests (state machine, session lifecycle, crash recovery)
 npm run test:rust
 
-# Run Tauri dev server
-npm run tauri dev
+# Build all packages & desktop frontend
+npm run build
 ```
