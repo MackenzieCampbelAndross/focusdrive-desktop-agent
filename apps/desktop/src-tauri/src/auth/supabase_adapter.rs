@@ -15,20 +15,25 @@ struct SupabaseVerifyOtpResponse {
 #[derive(Debug, Clone, Deserialize)]
 struct SupabaseUser {
     id: String,
+    email: Option<String>,
 }
 
+/// Matches the real production public.employees schema:
+/// id TEXT, name TEXT, email TEXT, initials TEXT, role TEXT, title TEXT,
+/// team_id TEXT, manager_id TEXT, timezone TEXT, shift_start TEXT,
+/// shift_end TEXT, shift_overnight BOOLEAN, shift_days TEXT, status TEXT, hired_on DATE
 #[derive(Debug, Clone, Deserialize)]
-struct SupabaseEmployeeRow {
-    #[serde(alias = "employee_id")]
-    id: String,
-    #[serde(alias = "employee_name")]
-    name: String,
-    #[serde(alias = "employee_email")]
-    email: String,
-    #[serde(alias = "employee_role")]
-    role: String,
-    #[serde(alias = "employee_department")]
-    department: Option<String>,
+pub struct ProductionEmployeeRecord {
+    pub id: String,
+    pub name: String,
+    pub email: String,
+    pub initials: Option<String>,
+    pub role: Option<String>,
+    pub title: Option<String>,
+    pub team_id: Option<String>,
+    pub manager_id: Option<String>,
+    pub timezone: Option<String>,
+    pub status: Option<String>,
 }
 
 pub struct SupabaseAuthAdapter {
@@ -59,7 +64,7 @@ impl SupabaseAuthAdapter {
 
 impl AuthRepository for SupabaseAuthAdapter {
     fn request_otp(&self, email: &str) -> Result<OtpRequestResult> {
-        // 1. Rust-level domain restriction: exact @purpledrive.com check
+        // 1. Rust-level domain restriction: strictly @purpledrive.com check
         let valid_email = validate_and_normalize_email(email)?;
 
         let otp_endpoint = format!("{}/auth/v1/otp", self.supabase_url);
@@ -128,7 +133,7 @@ impl AuthRepository for SupabaseAuthAdapter {
         let sub_url = self.supabase_url.clone();
         let target_email = valid_email.clone();
 
-        let (access_token, auth_uid) = tokio::task::block_in_place(|| {
+        let access_token = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let res = client
                     .post(&verify_endpoint)
@@ -154,101 +159,77 @@ impl AuthRepository for SupabaseAuthAdapter {
                 let auth_data: SupabaseVerifyOtpResponse = serde_json::from_str(&res_text)
                     .map_err(|e| AppError::AuthError(format!("Invalid auth token response: {}", e)))?;
 
-                Ok::<_, AppError>((auth_data.access_token, auth_data.user.id))
+                Ok::<_, AppError>(auth_data.access_token)
             })
         })?;
 
-        // 1. Try secure link function first (if migration 20260908184500 is applied)
-        let rpc_endpoint = format!("{}/rest/v1/rpc/link_authenticated_desktop_employee", sub_url);
-        let client_rpc = self.client.clone();
-        let pub_key_rpc = self.publishable_key.clone();
-        let token_rpc = access_token.clone();
+        // Identity relationship: auth.users.email -> public.employees.email
+        // Query public.employees directly by normalized email using the actual production schema
+        let emp_endpoint = format!(
+            "{}/rest/v1/employees?select=id,name,email,initials,role,title,team_id,manager_id,timezone,status&email=ilike.{}",
+            sub_url, target_email
+        );
 
-        let maybe_profile = tokio::task::block_in_place(|| {
+        let client2 = self.client.clone();
+        let pub_key2 = self.publishable_key.clone();
+        let token_clone = access_token.clone();
+
+        let employees: Vec<ProductionEmployeeRecord> = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let rpc_res = client_rpc
-                    .post(&rpc_endpoint)
-                    .header("apikey", &pub_key_rpc)
-                    .header("Authorization", format!("Bearer {}", token_rpc))
-                    .header("Content-Type", "application/json")
-                    .json(&json!({}))
+                let emp_res = client2
+                    .get(&emp_endpoint)
+                    .header("apikey", &pub_key2)
+                    .header("Authorization", format!("Bearer {}", token_clone))
                     .send()
-                    .await;
+                    .await
+                    .map_err(|e| AppError::NetworkError(format!("Failed to query employee profile: {}", e)))?;
 
-                if let Ok(resp) = rpc_res {
-                    if resp.status().is_success() {
-                        if let Ok(rows) = resp.json::<Vec<SupabaseEmployeeRow>>().await {
-                            if let Some(first) = rows.into_iter().next() {
-                                return Some(EmployeeProfile {
-                                    id: first.id,
-                                    name: first.name,
-                                    email: first.email,
-                                    role: first.role,
-                                    department: first.department,
-                                });
-                            }
-                        }
-                    }
-                }
-                None
-            })
-        });
+                let emp_status = emp_res.status();
+                let emp_text = emp_res.text().await
+                    .map_err(|e| AppError::NetworkError(format!("Failed to read employee response: {}", e)))?;
 
-        // 2. Fallback to direct employees table query (compatible with existing FocusDrive schema)
-        let profile = match maybe_profile {
-            Some(p) => p,
-            None => {
-                let emp_endpoint = format!(
-                    "{}/rest/v1/employees?select=*&or=(auth_user_id.eq.{},email.eq.{})",
-                    sub_url, auth_uid, target_email
-                );
-
-                let client2 = self.client.clone();
-                let pub_key2 = self.publishable_key.clone();
-                let token_clone = access_token.clone();
-
-                let employees: Vec<SupabaseEmployeeRow> = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        let emp_res = client2
-                            .get(&emp_endpoint)
-                            .header("apikey", &pub_key2)
-                            .header("Authorization", format!("Bearer {}", token_clone))
-                            .send()
-                            .await
-                            .map_err(|e| AppError::NetworkError(format!("Failed to query employee profile: {}", e)))?;
-
-                        let emp_status = emp_res.status();
-                        let emp_text = emp_res.text().await
-                            .map_err(|e| AppError::NetworkError(format!("Failed to read employee response: {}", e)))?;
-
-                        if !emp_status.is_success() {
-                            return Err(AppError::AuthError(format!(
-                                "Employee lookup error (HTTP {}): {}",
-                                emp_status.as_u16(),
-                                emp_text
-                            )));
-                        }
-
-                        serde_json::from_str(&emp_text)
-                            .map_err(|e| AppError::AuthError(format!("Invalid employee data structure: {}", e)))
-                    })
-                })?;
-
-                if let Some(first) = employees.into_iter().next() {
-                    EmployeeProfile {
-                        id: first.id,
-                        name: first.name,
-                        email: first.email,
-                        role: first.role,
-                        department: first.department,
-                    }
-                } else {
+                if !emp_status.is_success() {
                     return Err(AppError::AuthError(format!(
-                        "No authorized employee account found matching '{}'. Contact your PurpleDrive administrator.",
-                        target_email
+                        "Employee lookup error (HTTP {}): {}",
+                        emp_status.as_u16(),
+                        emp_text
                     )));
                 }
+
+                serde_json::from_str(&emp_text)
+                    .map_err(|e| AppError::AuthError(format!("Invalid employee data structure: {}", e)))
+            })
+        })?;
+
+        let employee_rec = match employees.into_iter().next() {
+            Some(emp) => emp,
+            None => {
+                return Err(AppError::AuthError(format!(
+                    "No authorized employee account found matching '{}'. Contact your PurpleDrive administrator.",
+                    target_email
+                )));
             }
+        };
+
+        // Determine authorization using existing FocusDrive employee status semantics:
+        // Statuses like 'offline', 'online', 'active' are eligible.
+        // Explicitly deactivated statuses like 'terminated', 'suspended', 'inactive' are not.
+        if let Some(ref st) = employee_rec.status {
+            let normalized_status = st.trim().to_lowercase();
+            if normalized_status == "terminated" || normalized_status == "suspended" || normalized_status == "inactive" || normalized_status == "deactivated" {
+                return Err(AppError::AuthError(format!(
+                    "Employee account for '{}' is currently {} and unauthorized for Desktop Agent access.",
+                    target_email, st
+                )));
+            }
+        }
+
+        let profile = EmployeeProfile {
+            id: employee_rec.id,
+            name: employee_rec.name,
+            email: employee_rec.email,
+            role: employee_rec.role.or(employee_rec.title).unwrap_or_else(|| "Employee".to_string()),
+            department: employee_rec.team_id,
         };
 
         if let Ok(mut u_lock) = self.current_user.lock() {
@@ -307,5 +288,6 @@ mod tests {
         assert_eq!(adapter.auth_mode(), AuthMode::SupabaseProduction);
         assert!(!adapter.is_development_mode());
         assert!(adapter.request_otp("user@gmail.com").is_err());
+        assert!(adapter.request_otp("user@quantumpulse.ltd").is_err());
     }
 }
