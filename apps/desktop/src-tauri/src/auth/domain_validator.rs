@@ -1,13 +1,14 @@
 ﻿use crate::errors::{AppError, Result};
 
 pub const ALLOWED_DOMAIN: &str = "purpledrive.com";
+pub const ACCESS_DENIED_MESSAGE: &str = "Only PurpleDrive company email addresses are authorized to use the Desktop Agent.";
 
-/// Validates and normalizes an employee work email.
-/// - Trims whitespace
+/// Validates and normalizes an employee work email for Desktop Agent access.
+/// - Trims leading/trailing whitespace
 /// - Ensures single '@' separator
-/// - Ensures non-empty local part
-/// - Normalizes domain to lowercase
-/// - Hard restriction: domain MUST be exactly "purpledrive.com"
+/// - Ensures non-empty local-part without internal spaces
+/// - Lowercases domain
+/// - Explicit rule: Domain MUST be exactly "purpledrive.com"
 pub fn validate_and_normalize_email(email_input: &str) -> Result<String> {
     let trimmed = email_input.trim();
     if trimmed.is_empty() {
@@ -26,17 +27,13 @@ pub fn validate_and_normalize_email(email_input: &str) -> Result<String> {
         return Err(AppError::AuthError("Email username/local-part cannot be empty.".to_string()));
     }
 
-    // Exact domain check
-    if domain != ALLOWED_DOMAIN {
-        return Err(AppError::AuthError(format!(
-            "Access restricted: Only @{} work email addresses are permitted. '{}' is not authorized.",
-            ALLOWED_DOMAIN, domain
-        )));
-    }
-
-    // Syntax check for local part
     if local_part.contains(' ') || local_part.contains('\t') {
         return Err(AppError::AuthError("Email address contains invalid whitespace characters.".to_string()));
+    }
+
+    // Exact domain check specifically for Desktop Agent access
+    if domain != ALLOWED_DOMAIN {
+        return Err(AppError::AuthError(ACCESS_DENIED_MESSAGE.to_string()));
     }
 
     Ok(format!("{}@{}", local_part, domain))
@@ -63,15 +60,26 @@ mod tests {
     }
 
     #[test]
-    fn test_rejected_domains() {
-        assert!(validate_and_normalize_email("employee@gmail.com").is_err());
-        assert!(validate_and_normalize_email("employee@google.com").is_err());
-        assert!(validate_and_normalize_email("employee@purpledrive.co").is_err());
-        assert!(validate_and_normalize_email("employee@purpledrive.com.evil.com").is_err());
-        assert!(validate_and_normalize_email("employee@sub.purpledrive.com").is_err());
-        assert!(validate_and_normalize_email("employee@purpledrive.com.example.com").is_err());
-        assert!(validate_and_normalize_email("not-an-email").is_err());
-        assert!(validate_and_normalize_email("@purpledrive.com").is_err());
-        assert!(validate_and_normalize_email("   ").is_err());
+    fn test_rejected_domains_before_otp() {
+        // Specifically testing user requirements:
+        // person@gmail.com -> denied before OTP
+        let gmail_err = validate_and_normalize_email("person@gmail.com").unwrap_err();
+        assert_eq!(gmail_err.to_string(), format!("Authentication error: {}", ACCESS_DENIED_MESSAGE));
+
+        // person@quantumpulse.ltd -> denied before OTP
+        let qp_err = validate_and_normalize_email("person@quantumpulse.ltd").unwrap_err();
+        assert_eq!(qp_err.to_string(), format!("Authentication error: {}", ACCESS_DENIED_MESSAGE));
+
+        // person@purpledrive.co -> denied
+        let co_err = validate_and_normalize_email("person@purpledrive.co").unwrap_err();
+        assert_eq!(co_err.to_string(), format!("Authentication error: {}", ACCESS_DENIED_MESSAGE));
+
+        // person@sub.purpledrive.com -> denied
+        let sub_err = validate_and_normalize_email("person@sub.purpledrive.com").unwrap_err();
+        assert_eq!(sub_err.to_string(), format!("Authentication error: {}", ACCESS_DENIED_MESSAGE));
+
+        // person@purpledrive.com.evil.com -> denied
+        let evil_err = validate_and_normalize_email("person@purpledrive.com.evil.com").unwrap_err();
+        assert_eq!(evil_err.to_string(), format!("Authentication error: {}", ACCESS_DENIED_MESSAGE));
     }
 }

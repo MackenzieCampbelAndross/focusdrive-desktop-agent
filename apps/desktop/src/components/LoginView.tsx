@@ -1,4 +1,4 @@
-﻿import { useState } from 'react';
+import { useState } from 'react';
 
 interface LoginViewProps {
   onSendOtp: (email: string) => Promise<void>;
@@ -34,8 +34,8 @@ export function LoginView({
     }
 
     const parts = trimmed.split('@');
-    if (parts.length !== 2 || parts[1].toLowerCase() !== 'purpledrive.com') {
-      setLocalValidationError('Only @purpledrive.com work email addresses are permitted.');
+    if (parts.length !== 2 || parts[1].toLowerCase() !== 'purpledrive.com' || !parts[0].trim()) {
+      setLocalValidationError('Only PurpleDrive company email addresses are authorized to use the Desktop Agent.');
       return;
     }
 
