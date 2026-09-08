@@ -8,6 +8,8 @@ pub mod persistence;
 pub mod session;
 pub mod state;
 pub mod tray;
+pub mod sync;
+pub mod native_messaging;
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -18,6 +20,7 @@ use session::SessionManager;
 use crate::telemetry::activity_aggregator::ActivityAggregator;
 use crate::telemetry::telemetry_loop::spawn_telemetry_loop;
 use crate::config::telemetry::TelemetryConfig;
+use crate::sync::worker::spawn_sync_worker;
 use tauri::WindowEvent;
 
 pub struct AppState {
@@ -51,16 +54,23 @@ pub fn run() {
 
     let session_manager = SessionManager::new(db.clone());
 
+    // Load .env if present
+    let _ = dotenvy::dotenv();
+
     // Determine auth mode explicitly (defaults to Development mode in dev environment)
     let auth_mode = match std::env::var("FOCUSDRIVE_AUTH_MODE").as_deref() {
         Ok("supabase") | Ok("production") => AuthMode::SupabaseProduction,
         _ => AuthMode::Development,
     };
 
-    let supabase_url = std::env::var("VITE_SUPABASE_URL").ok();
-    let anon_key = std::env::var("VITE_SUPABASE_ANON_KEY").ok();
+    let supabase_url = std::env::var("VITE_SUPABASE_URL")
+        .or_else(|_| std::env::var("SUPABASE_URL"))
+        .ok();
+    let publishable_key = std::env::var("VITE_SUPABASE_PUBLISHABLE_KEY")
+        .or_else(|_| std::env::var("SUPABASE_PUBLISHABLE_KEY"))
+        .ok();
 
-    let auth_repo = create_auth_repository(auth_mode, supabase_url, anon_key)
+    let auth_repo = create_auth_repository(auth_mode, supabase_url.clone(), publishable_key.clone())
         .unwrap_or_else(|_| create_auth_repository(AuthMode::Development, None, None).unwrap());
 
     // Note: Session recovery restores local shift state without fabricating authentication.
@@ -81,6 +91,20 @@ pub fn run() {
         Arc::clone(&app_state.session),
         activity_aggregator.clone(),
         telemetry_config,
+    );
+
+    // Spawn offline sync worker (interval 30s)
+    let sync_interval_secs = std::env::var("FOCUSDRIVE_SYNC_INTERVAL_SECONDS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(30);
+
+    let _sync_handle = spawn_sync_worker(
+        app_state.db.clone(),
+        Arc::clone(&app_state.auth),
+        supabase_url,
+        publishable_key,
+        sync_interval_secs,
     );
 
     tauri::Builder::default()

@@ -1,16 +1,17 @@
 import { useState } from 'react';
 
 interface LoginViewProps {
-  onLogin: (email: string) => void;
+  onLogin: (email: string, password: string) => void;
   error?: string | null;
 }
 
 export function LoginView({ onLogin, error }: LoginViewProps) {
-  const [email, setEmail] = useState('alex@focusdrive.dev');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onLogin(email);
+    onLogin(email, password);
   };
 
   return (
@@ -33,6 +34,7 @@ export function LoginView({ onLogin, error }: LoginViewProps) {
           </label>
           <input
             type="email"
+            placeholder="name@company.com"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             style={{ width: '100%', padding: '0.5rem', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '0.9rem' }}
@@ -46,11 +48,12 @@ export function LoginView({ onLogin, error }: LoginViewProps) {
           </label>
           <input
             type="password"
-            value="••••••••••••"
-            disabled
-            style={{ width: '100%', padding: '0.5rem', borderRadius: '6px', border: '1px solid #cbd5e1', backgroundColor: '#f8fafc', fontSize: '0.9rem' }}
+            placeholder="Enter password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            style={{ width: '100%', padding: '0.5rem', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '0.9rem' }}
+            required
           />
-          <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>Password auto-accepted in Development Auth Mode.</span>
         </div>
 
         <button

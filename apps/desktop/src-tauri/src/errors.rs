@@ -18,6 +18,9 @@ pub enum AppError {
     #[error("Database persistence error: {0}")]
     DatabaseError(String),
 
+    #[error("Network error: {0}")]
+    NetworkError(String),
+
     #[error("Internal error: {0}")]
     InternalError(String),
 }

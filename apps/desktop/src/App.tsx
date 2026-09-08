@@ -45,10 +45,10 @@ export default function App() {
     return () => clearInterval(interval);
   }, [syncState]);
 
-  const handleLogin = async (email: string) => {
+  const handleLogin = async (email: string, password: string) => {
     setError(null);
     try {
-      const profile = await invoke<EmployeeProfile>('login', { email, password: 'password' });
+      const profile = await invoke<EmployeeProfile>('login', { email, password });
       setCurrentUser(profile);
       await syncState();
     } catch (err) {

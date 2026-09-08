@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use crate::errors::{AppError, Result};
 use crate::persistence::Database;
 use crate::state::{StateMachine, SessionState};
+use crate::sync::queue::{SyncQueue, SyncPayload};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkSession {
@@ -125,20 +126,22 @@ impl SessionManager {
         };
 
         // Persist to SQLite with NULL ended_at
-        let conn = self.db.get_connection()?;
-        conn.execute(
-            "INSERT INTO work_sessions (id, employee_id, device_id, started_at, ended_at, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
-            [
-                &session.id,
-                &session.employee_id,
-                &session.device_id,
-                &session.started_at,
-                &session.status,
-                &session.created_at,
-            ],
-        )
-        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        {
+            let conn = self.db.get_connection()?;
+            conn.execute(
+                "INSERT INTO work_sessions (id, employee_id, device_id, started_at, ended_at, status, created_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
+                [
+                    &session.id,
+                    &session.employee_id,
+                    &session.device_id,
+                    &session.started_at,
+                    &session.status,
+                    &session.created_at,
+                ],
+            )
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        }
 
         self.active_session = Some(session.clone());
         self.is_recovered_session = false;
@@ -175,20 +178,22 @@ impl SessionManager {
         };
 
         // Persist to SQLite with NULL ended_at
-        let conn = self.db.get_connection()?;
-        conn.execute(
-            "INSERT INTO break_sessions (id, work_session_id, employee_id, type, started_at, ended_at, duration_seconds, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL, 0, ?6)",
-            [
-                &break_session.id,
-                &break_session.work_session_id,
-                &break_session.employee_id,
-                &break_session.break_type,
-                &break_session.started_at,
-                &break_session.created_at,
-            ],
-        )
-        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        {
+            let conn = self.db.get_connection()?;
+            conn.execute(
+                "INSERT INTO break_sessions (id, work_session_id, employee_id, type, started_at, ended_at, duration_seconds, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, 0, ?6)",
+                [
+                    &break_session.id,
+                    &break_session.work_session_id,
+                    &break_session.employee_id,
+                    &break_session.break_type,
+                    &break_session.started_at,
+                    &break_session.created_at,
+                ],
+            )
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        }
 
         self.active_break = Some(break_session.clone());
 
@@ -226,22 +231,27 @@ impl SessionManager {
             created_at: now.clone(),
         };
 
-        let conn = self.db.get_connection()?;
-        conn.execute(
-            "INSERT INTO break_sessions (id, work_session_id, employee_id, type, started_at, ended_at, duration_seconds, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL, 0, ?6)",
-            [
-                &break_session.id,
-                &break_session.work_session_id,
-                &break_session.employee_id,
-                &break_session.break_type,
-                &break_session.started_at,
-                &break_session.created_at,
-            ],
-        )
-        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        {
+            let conn = self.db.get_connection()?;
+            conn.execute(
+                "INSERT INTO break_sessions (id, work_session_id, employee_id, type, started_at, ended_at, duration_seconds, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, 0, ?6)",
+                [
+                    &break_session.id,
+                    &break_session.work_session_id,
+                    &break_session.employee_id,
+                    &break_session.break_type,
+                    &break_session.started_at,
+                    &break_session.created_at,
+                ],
+            )
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        }
 
         self.active_break = Some(break_session.clone());
+
+        // Lifecycle hook
+        self.on_break_start(&break_session);
 
         tracing::info!("Automatic idle break started");
 
@@ -269,18 +279,23 @@ impl SessionManager {
         // First 60 seconds are NOT counted as break time
         let effective_duration = (total_break_seconds - 60).max(0);
 
-        let conn = self.db.get_connection()?;
-        conn.execute(
-            "UPDATE break_sessions SET ended_at = ?1, duration_seconds = ?2 WHERE id = ?3",
-            [&now_str, &effective_duration.to_string(), &active_break.id],
-        )
-        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        {
+            let conn = self.db.get_connection()?;
+            conn.execute(
+                "UPDATE break_sessions SET ended_at = ?1, duration_seconds = ?2 WHERE id = ?3",
+                [&now_str, &effective_duration.to_string(), &active_break.id],
+            )
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        }
 
         let mut completed_break = active_break.clone();
         completed_break.ended_at = Some(now_str);
         completed_break.duration_seconds = effective_duration;
 
         self.active_break = None;
+
+        // Lifecycle hook
+        self.on_break_end(&completed_break);
 
         tracing::info!("Automatic idle break ended. Effective duration: {}s", effective_duration);
 
@@ -303,12 +318,14 @@ impl SessionManager {
 
         let duration = (now_dt - start_dt).num_seconds().max(0);
 
-        let conn = self.db.get_connection()?;
-        conn.execute(
-            "UPDATE break_sessions SET ended_at = ?1, duration_seconds = ?2 WHERE id = ?3",
-            [&now_str, &duration.to_string(), &active_break.id],
-        )
-        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        {
+            let conn = self.db.get_connection()?;
+            conn.execute(
+                "UPDATE break_sessions SET ended_at = ?1, duration_seconds = ?2 WHERE id = ?3",
+                [&now_str, &duration.to_string(), &active_break.id],
+            )
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        }
 
         let mut completed_break = active_break.clone();
         completed_break.ended_at = Some(now_str);
@@ -337,12 +354,14 @@ impl SessionManager {
 
         let duration = (now_dt - start_dt).num_seconds().max(0);
 
-        let conn = self.db.get_connection()?;
-        conn.execute(
-            "UPDATE break_sessions SET ended_at = ?1, duration_seconds = ?2 WHERE id = ?3",
-            [&now_str, &duration.to_string(), &active_break.id],
-        )
-        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        {
+            let conn = self.db.get_connection()?;
+            conn.execute(
+                "UPDATE break_sessions SET ended_at = ?1, duration_seconds = ?2 WHERE id = ?3",
+                [&now_str, &duration.to_string(), &active_break.id],
+            )
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        }
 
         let mut completed_break = active_break.clone();
         completed_break.ended_at = Some(now_str);
@@ -381,24 +400,28 @@ impl SessionManager {
 
         let total_shift_duration = (now_dt - start_dt).num_seconds().max(0);
 
-        // Sum duration of all completed break sessions for this work session
-        let conn = self.db.get_connection()?;
-        let mut stmt = conn
-            .prepare("SELECT SUM(duration_seconds) FROM break_sessions WHERE work_session_id = ?1 AND ended_at IS NOT NULL")
+        // Sum duration of all completed break sessions and update work session row
+        let (total_break_duration, effective_working_duration) = {
+            let conn = self.db.get_connection()?;
+            let mut stmt = conn
+                .prepare("SELECT SUM(duration_seconds) FROM break_sessions WHERE work_session_id = ?1 AND ended_at IS NOT NULL")
+                .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+            let total_break: i64 = stmt
+                .query_row([&session.id], |row| Ok(row.get(0).unwrap_or(0)))
+                .unwrap_or(0);
+
+            let effective = (total_shift_duration - total_break).max(0);
+
+            // Update work session row with real timestamp (not NULL)
+            conn.execute(
+                "UPDATE work_sessions SET ended_at = ?1, status = 'completed' WHERE id = ?2",
+                [&now_str, &session.id],
+            )
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
-        let total_break_duration: i64 = stmt
-            .query_row([&session.id], |row| Ok(row.get(0).unwrap_or(0)))
-            .unwrap_or(0);
-
-        let effective_working_duration = (total_shift_duration - total_break_duration).max(0);
-
-        // Update work session row with real timestamp (not NULL)
-        conn.execute(
-            "UPDATE work_sessions SET ended_at = ?1, status = 'completed' WHERE id = ?2",
-            [&now_str, &session.id],
-        )
-        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+            (total_break, effective)
+        };
 
         let summary = SessionSummary {
             work_session_id: session.id.clone(),
@@ -486,24 +509,34 @@ impl SessionManager {
     }
 
     // Telemetry lifecycle hooks
-    fn on_shift_start(&self, _session: &WorkSession) {
+    fn on_shift_start(&self, session: &WorkSession) {
         tracing::info!("Telemetry Lifecycle Hook: Shift Started");
+        let queue = SyncQueue::new(self.db.clone());
+        let _ = queue.enqueue(&SyncPayload::WorkSession(session.clone()));
     }
 
-    fn on_break_start(&self, _break_session: &BreakSession) {
+    fn on_break_start(&self, break_session: &BreakSession) {
         tracing::info!("Telemetry Lifecycle Hook: Break Started");
+        let queue = SyncQueue::new(self.db.clone());
+        let _ = queue.enqueue(&SyncPayload::BreakSession(break_session.clone()));
     }
 
-    fn on_break_end(&self, _break_session: &BreakSession) {
+    fn on_break_end(&self, break_session: &BreakSession) {
         tracing::info!("Telemetry Lifecycle Hook: Break Resumed (Employee returned to work)");
+        let queue = SyncQueue::new(self.db.clone());
+        let _ = queue.enqueue(&SyncPayload::BreakSession(break_session.clone()));
     }
 
-    fn on_break_end_for_shift_completion(&self, _break_session: &BreakSession) {
+    fn on_break_end_for_shift_completion(&self, break_session: &BreakSession) {
         tracing::info!("Telemetry Lifecycle Hook: Break Closed directly for Shift Finalization");
+        let queue = SyncQueue::new(self.db.clone());
+        let _ = queue.enqueue(&SyncPayload::BreakSession(break_session.clone()));
     }
 
-    fn on_shift_end(&self, _summary: &SessionSummary) {
+    fn on_shift_end(&self, summary: &SessionSummary) {
         tracing::info!("Telemetry Lifecycle Hook: Shift Finalized");
+        let queue = SyncQueue::new(self.db.clone());
+        let _ = queue.enqueue(&SyncPayload::SessionSummary(summary.clone()));
     }
 }
 

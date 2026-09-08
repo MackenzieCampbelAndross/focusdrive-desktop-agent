@@ -28,15 +28,15 @@ pub trait AuthRepository: Send + Sync {
     fn auth_mode(&self) -> AuthMode;
 }
 
-pub fn create_auth_repository(mode: AuthMode, supabase_url: Option<String>, anon_key: Option<String>) -> Result<Box<dyn AuthRepository>> {
+pub fn create_auth_repository(mode: AuthMode, supabase_url: Option<String>, publishable_key: Option<String>) -> Result<Box<dyn AuthRepository>> {
     match mode {
         AuthMode::Development => Ok(Box::new(dev_adapter::DevelopmentAuthAdapter::new())),
         AuthMode::SupabaseProduction => {
             let url = supabase_url.ok_or_else(|| {
                 AppError::AuthError("Production auth requires VITE_SUPABASE_URL configuration.".to_string())
             })?;
-            let key = anon_key.ok_or_else(|| {
-                AppError::AuthError("Production auth requires VITE_SUPABASE_ANON_KEY configuration.".to_string())
+            let key = publishable_key.ok_or_else(|| {
+                AppError::AuthError("Production auth requires VITE_SUPABASE_PUBLISHABLE_KEY configuration.".to_string())
             })?;
             Ok(Box::new(supabase_adapter::SupabaseAuthAdapter::new(url, key)))
         }
