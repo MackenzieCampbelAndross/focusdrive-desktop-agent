@@ -1,4 +1,4 @@
-use crate::auth::{AuthRepository, EmployeeProfile};
+use crate::auth::{AuthMode, AuthRepository, EmployeeProfile};
 use crate::errors::{AppError, Result};
 
 pub struct SupabaseAuthAdapter {
@@ -18,7 +18,10 @@ impl SupabaseAuthAdapter {
 impl AuthRepository for SupabaseAuthAdapter {
     fn login(&self, _email: &str, _password: &str) -> Result<EmployeeProfile> {
         Err(AppError::AuthError(
-            "Supabase authentication is not yet connected in this environment. Use Development Auth Mode.".to_string()
+            format!(
+                "Supabase production authentication target ({}) is not yet connected. Configure credentials in SUPABASE_SETUP.md.",
+                self._supabase_url
+            )
         ))
     }
 
@@ -32,5 +35,25 @@ impl AuthRepository for SupabaseAuthAdapter {
 
     fn is_development_mode(&self) -> bool {
         false
+    }
+
+    fn auth_mode(&self) -> AuthMode {
+        AuthMode::SupabaseProduction
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_supabase_auth_mode_isolation() {
+        let adapter = SupabaseAuthAdapter::new(
+            "https://test.supabase.co".to_string(),
+            "anon-key".to_string(),
+        );
+        assert_eq!(adapter.auth_mode(), AuthMode::SupabaseProduction);
+        assert!(!adapter.is_development_mode());
+        assert!(adapter.login("test@focusdrive.dev", "pwd").is_err());
     }
 }

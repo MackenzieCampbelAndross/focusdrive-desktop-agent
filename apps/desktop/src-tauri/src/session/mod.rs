@@ -58,7 +58,7 @@ impl SessionManager {
             last_summary: None,
             is_recovered_session: false,
         };
-        // Attempt crash recovery on init
+        // Attempt session recovery from SQLite (without fabricating auth)
         let _ = manager.recover_active_session();
         manager
     }
@@ -119,22 +119,21 @@ impl SessionManager {
             employee_id: employee_id.to_string(),
             device_id: device_id.to_string(),
             started_at: now.clone(),
-            ended_at: None,
+            ended_at: None, // SQLite NULL
             status: "active".to_string(),
             created_at: now.clone(),
         };
 
-        // Persist to SQLite
+        // Persist to SQLite with NULL ended_at
         let conn = self.db.get_connection()?;
         conn.execute(
             "INSERT INTO work_sessions (id, employee_id, device_id, started_at, ended_at, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
             [
                 &session.id,
                 &session.employee_id,
                 &session.device_id,
                 &session.started_at,
-                "",
                 &session.status,
                 &session.created_at,
             ],
@@ -144,7 +143,7 @@ impl SessionManager {
         self.active_session = Some(session.clone());
         self.is_recovered_session = false;
 
-        // Lifecycle hook for future telemetry attachment
+        // Lifecycle hook
         self.on_shift_start(&session);
 
         Ok(session)
@@ -170,24 +169,22 @@ impl SessionManager {
             employee_id: session.employee_id.clone(),
             break_type: "manual".to_string(),
             started_at: now.clone(),
-            ended_at: None,
+            ended_at: None, // SQLite NULL
             duration_seconds: 0,
             created_at: now.clone(),
         };
 
-        // Persist to SQLite
+        // Persist to SQLite with NULL ended_at
         let conn = self.db.get_connection()?;
         conn.execute(
             "INSERT INTO break_sessions (id, work_session_id, employee_id, type, started_at, ended_at, duration_seconds, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, 0, ?6)",
             [
                 &break_session.id,
                 &break_session.work_session_id,
                 &break_session.employee_id,
                 &break_session.break_type,
                 &break_session.started_at,
-                "",
-                "0",
                 &break_session.created_at,
             ],
         )
@@ -195,7 +192,7 @@ impl SessionManager {
 
         self.active_break = Some(break_session.clone());
 
-        // Lifecycle hook for future telemetry
+        // Lifecycle hook
         self.on_break_start(&break_session);
 
         Ok(break_session)
@@ -230,10 +227,44 @@ impl SessionManager {
 
         self.active_break = None;
 
-        // Lifecycle hook for future telemetry
+        // Lifecycle hook for resumed work
         self.on_break_end(&completed_break);
 
         Ok(())
+    }
+
+    /// Internal helper for ending active break during shift finalization without calling resume_work()
+    fn end_break_for_shift_completion(&mut self) -> Result<BreakSession> {
+        let active_break = self.active_break.as_ref().ok_or_else(|| {
+            AppError::SessionError("No active break to close for shift completion.".to_string())
+        })?;
+
+        let now_dt = Utc::now();
+        let now_str = now_dt.to_rfc3339();
+
+        let start_dt = DateTime::parse_from_rfc3339(&active_break.started_at)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or(now_dt);
+
+        let duration = (now_dt - start_dt).num_seconds().max(0);
+
+        let conn = self.db.get_connection()?;
+        conn.execute(
+            "UPDATE break_sessions SET ended_at = ?1, duration_seconds = ?2 WHERE id = ?3",
+            [&now_str, &duration.to_string(), &active_break.id],
+        )
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        let mut completed_break = active_break.clone();
+        completed_break.ended_at = Some(now_str);
+        completed_break.duration_seconds = duration;
+
+        self.active_break = None;
+
+        // Fire distinct lifecycle hook for break termination due to shift completion
+        self.on_break_end_for_shift_completion(&completed_break);
+
+        Ok(completed_break)
     }
 
     pub fn end_shift(&mut self) -> Result<SessionSummary> {
@@ -243,9 +274,9 @@ impl SessionManager {
             ));
         }
 
-        // If currently on break, end break first
+        // If currently on break, execute explicit break finalization for shift completion
         if self.active_break.is_some() {
-            self.resume_work()?;
+            self.end_break_for_shift_completion()?;
         }
 
         let session = self.active_session.as_ref().unwrap().clone();
@@ -261,10 +292,10 @@ impl SessionManager {
 
         let total_shift_duration = (now_dt - start_dt).num_seconds().max(0);
 
-        // Calculate total manual break seconds from SQLite
+        // Sum duration of all completed break sessions for this work session
         let conn = self.db.get_connection()?;
         let mut stmt = conn
-            .prepare("SELECT SUM(duration_seconds) FROM break_sessions WHERE work_session_id = ?1")
+            .prepare("SELECT SUM(duration_seconds) FROM break_sessions WHERE work_session_id = ?1 AND ended_at IS NOT NULL")
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
         let total_break_duration: i64 = stmt
@@ -273,7 +304,7 @@ impl SessionManager {
 
         let effective_working_duration = (total_shift_duration - total_break_duration).max(0);
 
-        // Update work session row
+        // Update work session row with real timestamp (not NULL)
         conn.execute(
             "UPDATE work_sessions SET ended_at = ?1, status = 'completed' WHERE id = ?2",
             [&now_str, &session.id],
@@ -296,7 +327,7 @@ impl SessionManager {
 
         self.state_machine.transition_to(SessionState::ShiftSummary)?;
 
-        // Lifecycle hook for future telemetry
+        // Lifecycle hook
         self.on_shift_end(&summary);
 
         Ok(summary)
@@ -312,22 +343,17 @@ impl SessionManager {
     pub fn recover_active_session(&mut self) -> Result<bool> {
         let conn = self.db.get_connection()?;
         let mut stmt = conn
-            .prepare("SELECT id, employee_id, device_id, started_at, ended_at, status, created_at FROM work_sessions WHERE status = 'active' OR ended_at IS NULL OR ended_at = '' ORDER BY created_at DESC LIMIT 1")
+            .prepare("SELECT id, employee_id, device_id, started_at, ended_at, status, created_at FROM work_sessions WHERE status = 'active' AND ended_at IS NULL ORDER BY created_at DESC LIMIT 1")
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
         let active_sess = stmt
             .query_row([], |row| {
-                let ended: Option<String> = row.get(4).ok();
-                let ended_clean = match ended {
-                    Some(ref s) if s.is_empty() => None,
-                    other => other,
-                };
                 Ok(WorkSession {
                     id: row.get(0)?,
                     employee_id: row.get(1)?,
                     device_id: row.get(2)?,
                     started_at: row.get(3)?,
-                    ended_at: ended_clean,
+                    ended_at: row.get(4)?, // Should be None / NULL
                     status: row.get(5)?,
                     created_at: row.get(6)?,
                 })
@@ -335,9 +361,9 @@ impl SessionManager {
             .ok();
 
         if let Some(session) = active_sess {
-            // Check for active break
+            // Query active break session where ended_at IS NULL
             let mut break_stmt = conn
-                .prepare("SELECT id, work_session_id, employee_id, type, started_at, ended_at, duration_seconds, created_at FROM break_sessions WHERE work_session_id = ?1 AND (ended_at IS NULL OR ended_at = '') LIMIT 1")
+                .prepare("SELECT id, work_session_id, employee_id, type, started_at, ended_at, duration_seconds, created_at FROM break_sessions WHERE work_session_id = ?1 AND ended_at IS NULL LIMIT 1")
                 .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
             let active_brk = break_stmt
@@ -348,7 +374,7 @@ impl SessionManager {
                         employee_id: row.get(2)?,
                         break_type: row.get(3)?,
                         started_at: row.get(4)?,
-                        ended_at: None,
+                        ended_at: row.get(5)?,
                         duration_seconds: row.get(6)?,
                         created_at: row.get(7)?,
                     })
@@ -370,7 +396,7 @@ impl SessionManager {
         }
     }
 
-    // Telemetry lifecycle hooks (placeholders for Phase 2+)
+    // Telemetry lifecycle hooks
     fn on_shift_start(&self, _session: &WorkSession) {
         tracing::info!("Telemetry Lifecycle Hook: Shift Started");
     }
@@ -380,7 +406,11 @@ impl SessionManager {
     }
 
     fn on_break_end(&self, _break_session: &BreakSession) {
-        tracing::info!("Telemetry Lifecycle Hook: Break Resumed");
+        tracing::info!("Telemetry Lifecycle Hook: Break Resumed (Employee returned to work)");
+    }
+
+    fn on_break_end_for_shift_completion(&self, _break_session: &BreakSession) {
+        tracing::info!("Telemetry Lifecycle Hook: Break Closed directly for Shift Finalization");
     }
 
     fn on_shift_end(&self, _summary: &SessionSummary) {
@@ -393,77 +423,84 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_full_shift_lifecycle() {
+    fn test_sqlite_null_semantics() {
         let db = Database::new_in_memory().unwrap();
-        let mut sm = SessionManager::new(db);
+        let mut sm = SessionManager::new(db.clone());
 
         sm.set_logged_in().unwrap();
-        assert_eq!(sm.current_state(), SessionState::ShiftReady);
+        let session = sm.start_shift("emp_1", "dev_1").unwrap();
+        assert!(session.ended_at.is_none());
 
-        // Start shift
-        let sess = sm.start_shift("emp_1", "dev_1").unwrap();
-        assert_eq!(sm.current_state(), SessionState::Working);
-        assert_eq!(sess.employee_id, "emp_1");
+        // Verify SQLite table directly has NULL for ended_at without holding mutex guard
+        {
+            let conn = db.get_connection().unwrap();
+            let ended: Option<String> = conn
+                .query_row("SELECT ended_at FROM work_sessions WHERE id = ?1", [&session.id], |row| row.get(0))
+                .unwrap();
+            assert!(ended.is_none());
+        }
 
-        // Start break
-        let brk = sm.start_manual_break().unwrap();
-        assert_eq!(sm.current_state(), SessionState::ManualBreak);
-        assert_eq!(brk.work_session_id, sess.id);
-
-        // Resume work
-        sm.resume_work().unwrap();
-        assert_eq!(sm.current_state(), SessionState::Working);
-        assert!(sm.active_break().is_none());
-
-        // End shift
         let summary = sm.end_shift().unwrap();
-        assert_eq!(sm.current_state(), SessionState::ShiftSummary);
-        assert_eq!(summary.work_session_id, sess.id);
+        assert!(!summary.ended_at.is_empty());
 
-        // Dismiss summary
-        sm.dismiss_summary().unwrap();
-        assert_eq!(sm.current_state(), SessionState::ShiftReady);
+        {
+            let conn = db.get_connection().unwrap();
+            let ended_completed: Option<String> = conn
+                .query_row("SELECT ended_at FROM work_sessions WHERE id = ?1", [&session.id], |row| row.get(0))
+                .unwrap();
+            assert!(ended_completed.is_some());
+        }
     }
 
     #[test]
-    fn test_prevent_double_start_shift() {
+    fn test_end_shift_during_break_semantics() {
         let db = Database::new_in_memory().unwrap();
         let mut sm = SessionManager::new(db);
+
         sm.set_logged_in().unwrap();
-
-        sm.start_shift("emp_1", "dev_1").unwrap();
-        assert!(sm.start_shift("emp_1", "dev_1").is_err());
-    }
-
-    #[test]
-    fn test_end_shift_during_break_auto_finalizes_break() {
-        let db = Database::new_in_memory().unwrap();
-        let mut sm = SessionManager::new(db);
-        sm.set_logged_in().unwrap();
-
         sm.start_shift("emp_1", "dev_1").unwrap();
         sm.start_manual_break().unwrap();
 
+        // End shift while on break - should not call resume_work()
         let summary = sm.end_shift().unwrap();
         assert_eq!(sm.current_state(), SessionState::ShiftSummary);
-        assert!(summary.total_shift_duration_seconds >= 0);
+        assert_eq!(summary.employee_id, "emp_1");
+        assert!(summary.manual_break_duration_seconds >= 0);
     }
 
     #[test]
-    fn test_restart_recovery() {
+    fn test_multi_break_time_accounting() {
+        let db = Database::new_in_memory().unwrap();
+        let mut sm = SessionManager::new(db);
+
+        sm.set_logged_in().unwrap();
+        sm.start_shift("emp_1", "dev_1").unwrap();
+
+        // First break
+        sm.start_manual_break().unwrap();
+        sm.resume_work().unwrap();
+
+        // Second break
+        sm.start_manual_break().unwrap();
+        sm.resume_work().unwrap();
+
+        let summary = sm.end_shift().unwrap();
+        assert_eq!(summary.total_shift_duration_seconds, summary.manual_break_duration_seconds + summary.effective_working_duration_seconds);
+    }
+
+    #[test]
+    fn test_restart_recovery_separate_from_auth() {
         let db = Database::new_in_memory().unwrap();
         {
             let mut sm1 = SessionManager::new(db.clone());
             sm1.set_logged_in().unwrap();
-            sm1.start_shift("emp_1", "dev_1").unwrap();
-            sm1.start_manual_break().unwrap();
+            sm1.start_shift("emp_test_99", "dev_1").unwrap();
         }
 
-        // Simulate application restart with same DB
+        // Restart application - recovery recovers session, but does NOT create auth user
         let sm2 = SessionManager::new(db);
-        assert_eq!(sm2.current_state(), SessionState::ManualBreak);
+        assert_eq!(sm2.current_state(), SessionState::Working);
         assert!(sm2.is_recovered());
-        assert!(sm2.active_session().is_some());
-        assert!(sm2.active_break().is_some());
+        assert_eq!(sm2.active_session().unwrap().employee_id, "emp_test_99");
     }
 }

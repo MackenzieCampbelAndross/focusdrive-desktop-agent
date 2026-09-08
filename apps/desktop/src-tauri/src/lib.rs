@@ -9,13 +9,13 @@ pub mod tray;
 
 use std::sync::{Arc, Mutex};
 use tauri::WindowEvent;
-use auth::{AuthRepository, dev_adapter::DevelopmentAuthAdapter};
+use auth::{AuthMode, create_auth_repository};
 use device::{DeviceInfo, DeviceManager};
 use persistence::Database;
 use session::SessionManager;
 
 pub struct AppState {
-    pub auth: Arc<Mutex<Box<dyn AuthRepository>>>,
+    pub auth: Arc<Mutex<Box<dyn auth::AuthRepository>>>,
     pub session: Arc<Mutex<SessionManager>>,
     pub device_info: Arc<Mutex<DeviceInfo>>,
     pub db: Database,
@@ -43,17 +43,23 @@ pub fn run() {
         });
 
     let session_manager = SessionManager::new(db.clone());
-    let dev_auth = DevelopmentAuthAdapter::new();
 
-    // If session was recovered, set user as logged in automatically
-    if session_manager.is_recovered() {
-        if let Some(active_sess) = session_manager.active_session() {
-            let _ = dev_auth.login(&active_sess.employee_id, "");
-        }
-    }
+    // Determine auth mode explicitly (defaults to Development mode in dev environment)
+    let auth_mode = match std::env::var("FOCUSDRIVE_AUTH_MODE").as_deref() {
+        Ok("supabase") | Ok("production") => AuthMode::SupabaseProduction,
+        _ => AuthMode::Development,
+    };
+
+    let supabase_url = std::env::var("VITE_SUPABASE_URL").ok();
+    let anon_key = std::env::var("VITE_SUPABASE_ANON_KEY").ok();
+
+    let auth_repo = create_auth_repository(auth_mode, supabase_url, anon_key)
+        .unwrap_or_else(|_| create_auth_repository(AuthMode::Development, None, None).unwrap());
+
+    // Note: Session recovery restores local shift state without fabricating authentication.
 
     let app_state = AppState {
-        auth: Arc::new(Mutex::new(Box::new(dev_auth))),
+        auth: Arc::new(Mutex::new(auth_repo)),
         session: Arc::new(Mutex::new(session_manager)),
         device_info: Arc::new(Mutex::new(device_info)),
         db,

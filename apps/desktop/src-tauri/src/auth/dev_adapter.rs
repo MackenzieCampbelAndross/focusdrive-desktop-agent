@@ -1,5 +1,5 @@
 use std::sync::Mutex;
-use crate::auth::{AuthRepository, EmployeeProfile};
+use crate::auth::{AuthMode, AuthRepository, EmployeeProfile};
 use crate::errors::{AppError, Result};
 
 pub struct DevelopmentAuthAdapter {
@@ -65,5 +65,28 @@ impl AuthRepository for DevelopmentAuthAdapter {
 
     fn is_development_mode(&self) -> bool {
         true
+    }
+
+    fn auth_mode(&self) -> AuthMode {
+        AuthMode::Development
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dev_auth_gating() {
+        let adapter = DevelopmentAuthAdapter::new();
+        assert_eq!(adapter.auth_mode(), AuthMode::Development);
+        assert!(adapter.is_development_mode());
+
+        let user = adapter.login("alex@focusdrive.dev", "pwd").unwrap();
+        assert_eq!(user.email, "alex@focusdrive.dev");
+        assert_eq!(adapter.get_current_user().unwrap().email, "alex@focusdrive.dev");
+
+        adapter.logout().unwrap();
+        assert!(adapter.get_current_user().is_none());
     }
 }
