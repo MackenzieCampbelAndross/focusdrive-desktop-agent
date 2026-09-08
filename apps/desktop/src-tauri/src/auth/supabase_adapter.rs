@@ -1,12 +1,13 @@
-use std::sync::Mutex;
+﻿use std::sync::Mutex;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
-use crate::auth::{AuthMode, AuthRepository, EmployeeProfile};
+use crate::auth::{AuthMode, AuthRepository, EmployeeProfile, OtpRequestResult};
+use crate::auth::domain_validator::validate_and_normalize_email;
 use crate::errors::{AppError, Result};
 
 #[derive(Debug, Clone, Deserialize)]
-struct SupabaseAuthResponse {
+struct SupabaseVerifyOtpResponse {
     access_token: String,
     user: SupabaseUser,
 }
@@ -30,6 +31,7 @@ pub struct SupabaseAuthAdapter {
     publishable_key: String,
     client: Client,
     current_user: Mutex<Option<EmployeeProfile>>,
+    pending_email: Mutex<Option<String>>,
     access_token: Mutex<Option<String>>,
 }
 
@@ -40,6 +42,7 @@ impl SupabaseAuthAdapter {
             publishable_key,
             client: Client::new(),
             current_user: Mutex::new(None),
+            pending_email: Mutex::new(None),
             access_token: Mutex::new(None),
         }
     }
@@ -47,62 +50,103 @@ impl SupabaseAuthAdapter {
     pub fn get_access_token(&self) -> Option<String> {
         self.access_token.lock().ok()?.clone()
     }
-
-    pub fn get_supabase_url(&self) -> &str {
-        &self.supabase_url
-    }
-
-    pub fn get_publishable_key(&self) -> &str {
-        &self.publishable_key
-    }
 }
 
 impl AuthRepository for SupabaseAuthAdapter {
-    fn login(&self, email: &str, password: &str) -> Result<EmployeeProfile> {
-        let email = email.trim();
-        if email.is_empty() {
-            return Err(AppError::AuthError("Email cannot be empty".to_string()));
-        }
-        if password.is_empty() {
-            return Err(AppError::AuthError("Password cannot be empty".to_string()));
-        }
+    fn request_otp(&self, email: &str) -> Result<OtpRequestResult> {
+        // 1. Rust-level domain restriction: exact @purpledrive.com check
+        let valid_email = validate_and_normalize_email(email)?;
 
-        let auth_endpoint = format!("{}/auth/v1/token?grant_type=password", self.supabase_url);
-
+        let otp_endpoint = format!("{}/auth/v1/otp", self.supabase_url);
         let body = json!({
-            "email": email,
-            "password": password,
+            "email": valid_email,
+            "create_user": false, // Do NOT automatically create unknown users; existing employee required
         });
 
         let client = self.client.clone();
         let pub_key = self.publishable_key.clone();
-        let sub_url = self.supabase_url.clone();
-        let email_owned = email.to_string();
+        let target_email = valid_email.clone();
 
-        let (token, auth_uid) = tokio::task::block_in_place(|| {
+        tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let res = client
-                    .post(&auth_endpoint)
+                    .post(&otp_endpoint)
                     .header("apikey", &pub_key)
                     .header("Content-Type", "application/json")
                     .json(&body)
                     .send()
                     .await
-                    .map_err(|e| AppError::NetworkError(format!("Failed to connect to Supabase auth: {}", e)))?;
+                    .map_err(|e| AppError::NetworkError(format!("Failed to connect to Supabase auth service: {}", e)))?;
 
                 let status = res.status();
-                let res_text: String = res.text().await
+                if !status.is_success() {
+                    let err_text = res.text().await.unwrap_or_default();
+                    return Err(AppError::AuthError(format!(
+                        "Failed to send verification code (HTTP {}): {}",
+                        status.as_u16(),
+                        err_text
+                    )));
+                }
+
+                Ok::<_, AppError>(())
+            })
+        })?;
+
+        {
+            let mut pending = self.pending_email.lock().map_err(|e| AppError::InternalError(e.to_string()))?;
+            *pending = Some(valid_email.clone());
+        }
+
+        Ok(OtpRequestResult {
+            email: target_email,
+            message: "A verification code has been sent to your @purpledrive.com email address.".to_string(),
+            dev_otp: None, // Production NEVER exposes OTPs
+        })
+    }
+
+    fn verify_otp(&self, email: &str, token: &str) -> Result<EmployeeProfile> {
+        let valid_email = validate_and_normalize_email(email)?;
+        let token = token.trim();
+        if token.is_empty() {
+            return Err(AppError::AuthError("Verification code cannot be empty.".to_string()));
+        }
+
+        let verify_endpoint = format!("{}/auth/v1/verify", self.supabase_url);
+        let body = json!({
+            "type": "email",
+            "email": valid_email,
+            "token": token,
+        });
+
+        let client = self.client.clone();
+        let pub_key = self.publishable_key.clone();
+        let sub_url = self.supabase_url.clone();
+        let target_email = valid_email.clone();
+
+        let (access_token, auth_uid) = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let res = client
+                    .post(&verify_endpoint)
+                    .header("apikey", &pub_key)
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| AppError::NetworkError(format!("Failed to connect to Supabase auth service: {}", e)))?;
+
+                let status = res.status();
+                let res_text = res.text().await
                     .map_err(|e| AppError::NetworkError(format!("Failed to read auth response: {}", e)))?;
 
                 if !status.is_success() {
                     return Err(AppError::AuthError(format!(
-                        "Supabase authentication failed (HTTP {}): {}",
+                        "OTP verification failed (HTTP {}): {}",
                         status.as_u16(),
                         res_text
                     )));
                 }
 
-                let auth_data: SupabaseAuthResponse = serde_json::from_str(&res_text)
+                let auth_data: SupabaseVerifyOtpResponse = serde_json::from_str(&res_text)
                     .map_err(|e| AppError::AuthError(format!("Invalid auth token response: {}", e)))?;
 
                 Ok::<_, AppError>((auth_data.access_token, auth_data.user.id))
@@ -112,12 +156,12 @@ impl AuthRepository for SupabaseAuthAdapter {
         // Query public.employees matching auth_user_id or email
         let emp_endpoint = format!(
             "{}/rest/v1/employees?select=*&or=(auth_user_id.eq.{},email.eq.{})",
-            sub_url, auth_uid, email_owned
+            sub_url, auth_uid, target_email
         );
 
         let client2 = self.client.clone();
         let pub_key2 = self.publishable_key.clone();
-        let token_clone = token.clone();
+        let token_clone = access_token.clone();
 
         let employees: Vec<SupabaseEmployeeRow> = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
@@ -127,15 +171,15 @@ impl AuthRepository for SupabaseAuthAdapter {
                     .header("Authorization", format!("Bearer {}", token_clone))
                     .send()
                     .await
-                    .map_err(|e| AppError::NetworkError(format!("Failed to fetch employee record: {}", e)))?;
+                    .map_err(|e| AppError::NetworkError(format!("Failed to query employee profile: {}", e)))?;
 
                 let emp_status = emp_res.status();
-                let emp_text: String = emp_res.text().await
+                let emp_text = emp_res.text().await
                     .map_err(|e| AppError::NetworkError(format!("Failed to read employee response: {}", e)))?;
 
                 if !emp_status.is_success() {
                     return Err(AppError::AuthError(format!(
-                        "Failed to query employee profile (HTTP {}): {}",
+                        "Employee lookup error (HTTP {}): {}",
                         emp_status.as_u16(),
                         emp_text
                     )));
@@ -155,20 +199,21 @@ impl AuthRepository for SupabaseAuthAdapter {
                 department: first.department,
             }
         } else {
-            EmployeeProfile {
-                id: auth_uid,
-                name: email.split('@').next().unwrap_or("Employee").to_string(),
-                email: email.to_string(),
-                role: "employee".to_string(),
-                department: None,
-            }
+            // Requirement: Must correspond to an existing authorized employee. Do NOT silently create a fake employee record.
+            return Err(AppError::AuthError(format!(
+                "No authorized employee account found matching '{}'. Contact your PurpleDrive administrator.",
+                target_email
+            )));
         };
 
         if let Ok(mut u_lock) = self.current_user.lock() {
             *u_lock = Some(profile.clone());
         }
         if let Ok(mut t_lock) = self.access_token.lock() {
-            *t_lock = Some(token);
+            *t_lock = Some(access_token);
+        }
+        if let Ok(mut pending) = self.pending_email.lock() {
+            *pending = None;
         }
 
         Ok(profile)
@@ -181,11 +226,18 @@ impl AuthRepository for SupabaseAuthAdapter {
         if let Ok(mut t_lock) = self.access_token.lock() {
             *t_lock = None;
         }
+        if let Ok(mut pending) = self.pending_email.lock() {
+            *pending = None;
+        }
         Ok(())
     }
 
     fn get_current_user(&self) -> Option<EmployeeProfile> {
         self.current_user.lock().ok()?.clone()
+    }
+
+    fn get_pending_email(&self) -> Option<String> {
+        self.pending_email.lock().ok()?.clone()
     }
 
     fn is_development_mode(&self) -> bool {
@@ -209,5 +261,6 @@ mod tests {
         );
         assert_eq!(adapter.auth_mode(), AuthMode::SupabaseProduction);
         assert!(!adapter.is_development_mode());
+        assert!(adapter.request_otp("user@gmail.com").is_err());
     }
 }

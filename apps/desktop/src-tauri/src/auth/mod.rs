@@ -1,5 +1,6 @@
-pub mod dev_adapter;
+﻿pub mod dev_adapter;
 pub mod supabase_adapter;
+pub mod domain_validator;
 
 use serde::{Deserialize, Serialize};
 use crate::errors::{AppError, Result};
@@ -11,6 +12,17 @@ pub enum AuthMode {
     SupabaseProduction,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AuthState {
+    AuthLoading,
+    LoggedOut,
+    OtpRequested,
+    VerifyingOtp,
+    Authenticated,
+    RecoveryPendingAuth,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EmployeeProfile {
     pub id: String,
@@ -20,15 +32,28 @@ pub struct EmployeeProfile {
     pub department: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OtpRequestResult {
+    pub email: String,
+    pub message: String,
+    pub dev_otp: Option<String>, // ONLY populated in explicit development mode, NEVER in production
+}
+
 pub trait AuthRepository: Send + Sync {
-    fn login(&self, email: &str, password: &str) -> Result<EmployeeProfile>;
+    fn request_otp(&self, email: &str) -> Result<OtpRequestResult>;
+    fn verify_otp(&self, email: &str, code: &str) -> Result<EmployeeProfile>;
     fn logout(&self) -> Result<()>;
     fn get_current_user(&self) -> Option<EmployeeProfile>;
+    fn get_pending_email(&self) -> Option<String>;
     fn is_development_mode(&self) -> bool;
     fn auth_mode(&self) -> AuthMode;
 }
 
-pub fn create_auth_repository(mode: AuthMode, supabase_url: Option<String>, publishable_key: Option<String>) -> Result<Box<dyn AuthRepository>> {
+pub fn create_auth_repository(
+    mode: AuthMode,
+    supabase_url: Option<String>,
+    publishable_key: Option<String>,
+) -> Result<Box<dyn AuthRepository>> {
     match mode {
         AuthMode::Development => Ok(Box::new(dev_adapter::DevelopmentAuthAdapter::new())),
         AuthMode::SupabaseProduction => {

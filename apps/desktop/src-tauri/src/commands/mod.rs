@@ -1,6 +1,6 @@
-use tauri::State;
+﻿use tauri::State;
 use serde::Serialize;
-use crate::auth::EmployeeProfile;
+use crate::auth::{EmployeeProfile, OtpRequestResult, AuthState};
 use crate::device::DeviceInfo;
 use crate::errors::{AppError, Result};
 use crate::session::{WorkSession, BreakSession, SessionSummary};
@@ -9,7 +9,9 @@ use crate::AppState;
 
 #[derive(Serialize)]
 pub struct AuthStateResponse {
+    pub auth_state: AuthState,
     pub current_user: Option<EmployeeProfile>,
+    pub pending_email: Option<String>,
     pub is_development_mode: bool,
 }
 
@@ -35,20 +37,40 @@ pub struct AgentStatusResponse {
 #[tauri::command]
 pub async fn get_auth_state(state: State<'_, AppState>) -> Result<AuthStateResponse> {
     let auth = state.auth.lock().await;
+    let session = state.session.lock().await;
+
+    let auth_state = if session.current_state() == SessionState::RecoveryPendingAuth && auth.get_current_user().is_none() {
+        AuthState::RecoveryPendingAuth
+    } else if auth.get_current_user().is_some() {
+        AuthState::Authenticated
+    } else if auth.get_pending_email().is_some() {
+        AuthState::OtpRequested
+    } else {
+        AuthState::LoggedOut
+    };
+
     Ok(AuthStateResponse {
+        auth_state,
         current_user: auth.get_current_user(),
+        pending_email: auth.get_pending_email(),
         is_development_mode: auth.is_development_mode(),
     })
 }
 
 #[tauri::command]
-pub async fn login(email: String, password: String, state: State<'_, AppState>) -> Result<EmployeeProfile> {
+pub async fn request_otp(email: String, state: State<'_, AppState>) -> Result<OtpRequestResult> {
     let auth = state.auth.lock().await;
-    let profile = auth.login(&email, &password)?;
-    
+    auth.request_otp(&email)
+}
+
+#[tauri::command]
+pub async fn verify_otp(email: String, code: String, state: State<'_, AppState>) -> Result<EmployeeProfile> {
+    let auth = state.auth.lock().await;
+    let profile = auth.verify_otp(&email, &code)?;
+
     let mut session = state.session.lock().await;
-    session.set_logged_in()?;
-    
+    session.on_authenticated(&profile.id)?;
+
     Ok(profile)
 }
 
@@ -56,10 +78,10 @@ pub async fn login(email: String, password: String, state: State<'_, AppState>) 
 pub async fn logout(state: State<'_, AppState>) -> Result<()> {
     let mut session = state.session.lock().await;
     session.set_logged_out()?;
-    
+
     let auth = state.auth.lock().await;
     auth.logout()?;
-    
+
     Ok(())
 }
 
@@ -79,11 +101,11 @@ pub async fn get_session_state(state: State<'_, AppState>) -> Result<SessionStat
 pub async fn start_shift(state: State<'_, AppState>) -> Result<WorkSession> {
     let auth = state.auth.lock().await;
     let user = auth.get_current_user().ok_or_else(|| {
-        AppError::AuthError("Must be logged in to start a shift.".to_string())
+        AppError::AuthError("Must be authenticated with @purpledrive.com OTP to start a shift.".to_string())
     })?;
 
     let device = state.device_info.lock().await;
-    
+
     let mut session = state.session.lock().await;
     session.start_shift(&user.id, &device.device_id)
 }

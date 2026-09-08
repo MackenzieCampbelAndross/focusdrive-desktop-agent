@@ -1,4 +1,4 @@
-pub mod auth;
+﻿pub mod auth;
 pub mod config;
 pub mod telemetry;
 pub mod commands;
@@ -21,6 +21,8 @@ use crate::telemetry::activity_aggregator::ActivityAggregator;
 use crate::telemetry::telemetry_loop::spawn_telemetry_loop;
 use crate::config::telemetry::TelemetryConfig;
 use crate::sync::worker::spawn_sync_worker;
+use crate::native_messaging::host::run_native_host_stream;
+use crate::native_messaging::manifest::install_native_messaging_manifests;
 use tauri::WindowEvent;
 
 pub struct AppState {
@@ -31,16 +33,32 @@ pub struct AppState {
     pub activity_aggregator: Arc<Mutex<ActivityAggregator>>,
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    let db = match dirs::data_local_dir() {
+fn open_local_database() -> Database {
+    match dirs::data_local_dir() {
         Some(mut path) => {
             path.push("FocusDriveAgent");
+            let _ = std::fs::create_dir_all(&path);
             path.push("focusdrive_agent.db");
             Database::new_file(path).unwrap_or_else(|_| Database::new_in_memory().unwrap())
         }
         None => Database::new_in_memory().unwrap(),
-    };
+    }
+}
+
+/// Runs the native messaging host loop for browser extension communication (stdio).
+pub async fn run_native_messaging_host() {
+    let db = open_local_database();
+    let session_manager = Arc::new(Mutex::new(SessionManager::new(db.clone())));
+    let activity_aggregator = Arc::new(Mutex::new(ActivityAggregator::new(db)));
+
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    run_native_host_stream(stdin, stdout, session_manager, activity_aggregator).await;
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let db = open_local_database();
 
     let device_info = DeviceManager::get_or_create_device_info(&db)
         .unwrap_or_else(|_| DeviceInfo {
@@ -57,7 +75,7 @@ pub fn run() {
     // Load .env if present
     let _ = dotenvy::dotenv();
 
-    // Determine auth mode explicitly (defaults to Development mode in dev environment)
+    // Explicit auth mode configuration (defaults to Development mode for local testing)
     let auth_mode = match std::env::var("FOCUSDRIVE_AUTH_MODE").as_deref() {
         Ok("supabase") | Ok("production") => AuthMode::SupabaseProduction,
         _ => AuthMode::Development,
@@ -73,7 +91,12 @@ pub fn run() {
     let auth_repo = create_auth_repository(auth_mode, supabase_url.clone(), publishable_key.clone())
         .unwrap_or_else(|_| create_auth_repository(AuthMode::Development, None, None).unwrap());
 
-    // Note: Session recovery restores local shift state without fabricating authentication.
+    // Install Chrome and Edge native messaging host manifests automatically
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(exe_str) = current_exe.to_str() {
+            let _ = install_native_messaging_manifests(exe_str);
+        }
+    }
 
     // Initialize activity aggregator and telemetry loop
     let activity_aggregator = Arc::new(Mutex::new(ActivityAggregator::new(db.clone())));
@@ -123,7 +146,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_auth_state,
-            commands::login,
+            commands::request_otp,
+            commands::verify_otp,
             commands::logout,
             commands::get_session_state,
             commands::start_shift,

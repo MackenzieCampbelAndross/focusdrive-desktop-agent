@@ -1,10 +1,20 @@
-export type SessionState =
+﻿export type SessionState =
   | 'LOGGED_OUT'
   | 'SHIFT_READY'
   | 'WORKING'
   | 'MANUAL_BREAK'
+  | 'AUTOMATIC_BREAK'
   | 'SHIFT_COMPLETING'
-  | 'SHIFT_SUMMARY';
+  | 'SHIFT_SUMMARY'
+  | 'RECOVERY_PENDING_AUTH';
+
+export type AuthState =
+  | 'AUTH_LOADING'
+  | 'LOGGED_OUT'
+  | 'OTP_REQUESTED'
+  | 'VERIFYING_OTP'
+  | 'AUTHENTICATED'
+  | 'RECOVERY_PENDING_AUTH';
 
 export interface EmployeeProfile {
   id: string;
@@ -12,6 +22,12 @@ export interface EmployeeProfile {
   email: string;
   role: string;
   department?: string;
+}
+
+export interface OtpRequestResult {
+  email: string;
+  message: string;
+  dev_otp?: string;
 }
 
 export interface WorkSession {
@@ -55,7 +71,9 @@ export interface DeviceInfo {
 }
 
 export interface AuthStateResponse {
+  auth_state: AuthState;
   current_user: EmployeeProfile | null;
+  pending_email: string | null;
   is_development_mode: boolean;
 }
 

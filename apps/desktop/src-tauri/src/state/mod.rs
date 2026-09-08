@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+﻿use serde::{Deserialize, Serialize};
 use std::fmt;
 use crate::errors::{AppError, Result};
 
@@ -12,6 +12,7 @@ pub enum SessionState {
     AutomaticBreak,
     ShiftCompleting,
     ShiftSummary,
+    RecoveryPendingAuth,
 }
 
 impl fmt::Display for SessionState {
@@ -24,6 +25,7 @@ impl fmt::Display for SessionState {
             SessionState::AutomaticBreak => write!(f, "AUTOMATIC_BREAK"),
             SessionState::ShiftCompleting => write!(f, "SHIFT_COMPLETING"),
             SessionState::ShiftSummary => write!(f, "SHIFT_SUMMARY"),
+            SessionState::RecoveryPendingAuth => write!(f, "RECOVERY_PENDING_AUTH"),
         }
     }
 }
@@ -48,16 +50,22 @@ impl StateMachine {
         match (self.current_state, next_state) {
             (SessionState::LoggedOut, SessionState::ShiftReady) => true,
             (SessionState::ShiftReady, SessionState::Working) => true,
-                        (SessionState::Working, SessionState::AutomaticBreak) => true,
+            (SessionState::Working, SessionState::AutomaticBreak) => true,
             (SessionState::AutomaticBreak, SessionState::Working) => true,
             (SessionState::ManualBreak, SessionState::Working) => true,
             (SessionState::Working, SessionState::ManualBreak) => true,
             (SessionState::Working, SessionState::ShiftCompleting) => true,
-            (SessionState::ManualBreak, SessionState::ShiftCompleting) => true, // End shift during break
-            (SessionState::AutomaticBreak, SessionState::ShiftCompleting) => true, // End shift during auto break
+            (SessionState::ManualBreak, SessionState::ShiftCompleting) => true,
+            (SessionState::AutomaticBreak, SessionState::ShiftCompleting) => true,
             (SessionState::ShiftCompleting, SessionState::ShiftSummary) => true,
             (SessionState::ShiftSummary, SessionState::ShiftReady) => true,
             (SessionState::ShiftReady, SessionState::LoggedOut) => true,
+            // Recovery transitions:
+            (SessionState::RecoveryPendingAuth, SessionState::Working) => true,
+            (SessionState::RecoveryPendingAuth, SessionState::ManualBreak) => true,
+            (SessionState::RecoveryPendingAuth, SessionState::AutomaticBreak) => true,
+            (SessionState::RecoveryPendingAuth, SessionState::ShiftReady) => true,
+            (SessionState::RecoveryPendingAuth, SessionState::LoggedOut) => true,
             _ => false,
         }
     }
