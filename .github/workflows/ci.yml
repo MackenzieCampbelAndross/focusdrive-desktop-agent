@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  check-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install npm Dependencies
+        run: npm ci
+
+      - name: Build Shared Packages
+        run: npm run build:packages
+
+      - name: Build Desktop Frontend
+        run: npm run build:frontend
+
+      - name: Run Rust Tests
+        run: npm run test:rust

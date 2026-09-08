@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "FocusDrive Web Telemetry Companion",
+  "version": "0.1.0",
+  "description": "Companion extension for FocusDrive Workstation Telemetry Desktop Agent.",
+  "permissions": [
+    "tabs",
+    "nativeMessaging"
+  ],
+  "background": {
+    "service_worker": "dist/background.js"
+  },
+  "action": {
+    "default_title": "FocusDrive Agent Active"
+  }
+}
