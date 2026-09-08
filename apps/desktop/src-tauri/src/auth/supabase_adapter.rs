@@ -1,4 +1,4 @@
-﻿use std::sync::Mutex;
+use std::sync::Mutex;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
@@ -7,12 +7,14 @@ use crate::auth::domain_validator::validate_and_normalize_email;
 use crate::errors::{AppError, Result};
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 struct SupabaseVerifyOtpResponse {
     access_token: String,
     user: SupabaseUser,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 struct SupabaseUser {
     id: String,
     email: Option<String>,

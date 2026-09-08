@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default permissions for FocusDrive Desktop Agent main window",
+  "windows": [
+    "main",
+    "*"
+  ],
+  "permissions": [
+    "core:default"
+  ]
+}
