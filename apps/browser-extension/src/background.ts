@@ -4,7 +4,7 @@ const NATIVE_HOST_NAME = 'com.focusdrive.desktopagent.native';
 let port: chrome.runtime.Port | null = null;
 let lastReportedDomain: string | null = null;
 
-function getNativePort(): chrome.runtime.Port {
+function getNativePort(): chrome.runtime.Port | null {
   if (!port) {
     try {
       port = chrome.runtime.connectNative(NATIVE_HOST_NAME);

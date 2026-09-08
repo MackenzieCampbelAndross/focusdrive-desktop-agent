@@ -8,6 +8,7 @@
     "packages/*"
   ],
   "scripts": {
+    "dev": "npm run dev --workspace=apps/desktop",
     "build:packages": "npm run build --workspaces --if-present",
     "build:frontend": "npm run build --workspace=apps/desktop",
     "build:extension": "npm run build --workspace=apps/browser-extension --if-present",
