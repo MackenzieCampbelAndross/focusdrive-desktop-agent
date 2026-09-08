@@ -19,10 +19,15 @@ struct SupabaseUser {
 
 #[derive(Debug, Clone, Deserialize)]
 struct SupabaseEmployeeRow {
+    #[serde(alias = "employee_id")]
     id: String,
+    #[serde(alias = "employee_name")]
     name: String,
+    #[serde(alias = "employee_email")]
     email: String,
+    #[serde(alias = "employee_role")]
     role: String,
+    #[serde(alias = "employee_department")]
     department: Option<String>,
 }
 
@@ -153,57 +158,97 @@ impl AuthRepository for SupabaseAuthAdapter {
             })
         })?;
 
-        // Query public.employees matching auth_user_id or email
-        let emp_endpoint = format!(
-            "{}/rest/v1/employees?select=*&or=(auth_user_id.eq.{},email.eq.{})",
-            sub_url, auth_uid, target_email
-        );
+        // 1. Try secure link function first (if migration 20260908184500 is applied)
+        let rpc_endpoint = format!("{}/rest/v1/rpc/link_authenticated_desktop_employee", sub_url);
+        let client_rpc = self.client.clone();
+        let pub_key_rpc = self.publishable_key.clone();
+        let token_rpc = access_token.clone();
 
-        let client2 = self.client.clone();
-        let pub_key2 = self.publishable_key.clone();
-        let token_clone = access_token.clone();
-
-        let employees: Vec<SupabaseEmployeeRow> = tokio::task::block_in_place(|| {
+        let maybe_profile = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let emp_res = client2
-                    .get(&emp_endpoint)
-                    .header("apikey", &pub_key2)
-                    .header("Authorization", format!("Bearer {}", token_clone))
+                let rpc_res = client_rpc
+                    .post(&rpc_endpoint)
+                    .header("apikey", &pub_key_rpc)
+                    .header("Authorization", format!("Bearer {}", token_rpc))
+                    .header("Content-Type", "application/json")
+                    .json(&json!({}))
                     .send()
-                    .await
-                    .map_err(|e| AppError::NetworkError(format!("Failed to query employee profile: {}", e)))?;
+                    .await;
 
-                let emp_status = emp_res.status();
-                let emp_text = emp_res.text().await
-                    .map_err(|e| AppError::NetworkError(format!("Failed to read employee response: {}", e)))?;
+                if let Ok(resp) = rpc_res {
+                    if resp.status().is_success() {
+                        if let Ok(rows) = resp.json::<Vec<SupabaseEmployeeRow>>().await {
+                            if let Some(first) = rows.into_iter().next() {
+                                return Some(EmployeeProfile {
+                                    id: first.id,
+                                    name: first.name,
+                                    email: first.email,
+                                    role: first.role,
+                                    department: first.department,
+                                });
+                            }
+                        }
+                    }
+                }
+                None
+            })
+        });
 
-                if !emp_status.is_success() {
+        // 2. Fallback to direct employees table query (compatible with existing FocusDrive schema)
+        let profile = match maybe_profile {
+            Some(p) => p,
+            None => {
+                let emp_endpoint = format!(
+                    "{}/rest/v1/employees?select=*&or=(auth_user_id.eq.{},email.eq.{})",
+                    sub_url, auth_uid, target_email
+                );
+
+                let client2 = self.client.clone();
+                let pub_key2 = self.publishable_key.clone();
+                let token_clone = access_token.clone();
+
+                let employees: Vec<SupabaseEmployeeRow> = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let emp_res = client2
+                            .get(&emp_endpoint)
+                            .header("apikey", &pub_key2)
+                            .header("Authorization", format!("Bearer {}", token_clone))
+                            .send()
+                            .await
+                            .map_err(|e| AppError::NetworkError(format!("Failed to query employee profile: {}", e)))?;
+
+                        let emp_status = emp_res.status();
+                        let emp_text = emp_res.text().await
+                            .map_err(|e| AppError::NetworkError(format!("Failed to read employee response: {}", e)))?;
+
+                        if !emp_status.is_success() {
+                            return Err(AppError::AuthError(format!(
+                                "Employee lookup error (HTTP {}): {}",
+                                emp_status.as_u16(),
+                                emp_text
+                            )));
+                        }
+
+                        serde_json::from_str(&emp_text)
+                            .map_err(|e| AppError::AuthError(format!("Invalid employee data structure: {}", e)))
+                    })
+                })?;
+
+                if let Some(first) = employees.into_iter().next() {
+                    EmployeeProfile {
+                        id: first.id,
+                        name: first.name,
+                        email: first.email,
+                        role: first.role,
+                        department: first.department,
+                    }
+                } else {
                     return Err(AppError::AuthError(format!(
-                        "Employee lookup error (HTTP {}): {}",
-                        emp_status.as_u16(),
-                        emp_text
+                        "No authorized employee account found matching '{}'. Contact your PurpleDrive administrator.",
+                        target_email
                     )));
                 }
-
-                serde_json::from_str(&emp_text)
-                    .map_err(|e| AppError::AuthError(format!("Invalid employee data structure: {}", e)))
-            })
-        })?;
-
-        let profile = if let Some(first) = employees.into_iter().next() {
-            EmployeeProfile {
-                id: first.id,
-                name: first.name,
-                email: first.email,
-                role: first.role,
-                department: first.department,
             }
-        } else {
-            // Requirement: Must correspond to an existing authorized employee. Do NOT silently create a fake employee record.
-            return Err(AppError::AuthError(format!(
-                "No authorized employee account found matching '{}'. Contact your PurpleDrive administrator.",
-                target_email
-            )));
         };
 
         if let Ok(mut u_lock) = self.current_user.lock() {
